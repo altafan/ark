@@ -123,26 +123,6 @@ type service struct {
 	syncedCh chan struct{}
 }
 
-// NewService creates the wallet service, an option must be set to configure the chain source.
-func NewService(cfg WalletConfig, options ...WalletOption) (WalletService, error) {
-	wallet.UseLogger(logger("wallet"))
-
-	svc := &service{
-		cfg:                cfg,
-		watchedScriptsLock: sync.RWMutex{},
-		watchedScripts:     make(map[string]struct{}),
-		syncedCh:           make(chan struct{}),
-	}
-
-	for _, option := range options {
-		if err := option(svc); err != nil {
-			return nil, err
-		}
-	}
-
-	return svc, nil
-}
-
 // WithNeutrino creates a start a neutrino node using the provided service datadir
 func WithNeutrino(initialPeer string, esploraURL string) WalletOption {
 	return func(s *service) error {
@@ -357,6 +337,26 @@ func WithBitcoindZMQ(block, tx string, host, user, pass string) WalletOption {
 
 		return nil
 	}
+}
+
+// NewService creates the wallet service, an option must be set to configure the chain source.
+func NewService(cfg WalletConfig, options ...WalletOption) (WalletService, error) {
+	wallet.UseLogger(logger("wallet"))
+
+	svc := &service{
+		cfg:                cfg,
+		watchedScriptsLock: sync.RWMutex{},
+		watchedScripts:     make(map[string]struct{}),
+		syncedCh:           make(chan struct{}),
+	}
+
+	for _, option := range options {
+		if err := option(svc); err != nil {
+			return nil, err
+		}
+	}
+
+	return svc, nil
 }
 
 func (s *service) Close() {
