@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/lightninglabs/neutrino"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
@@ -29,6 +28,7 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/lightninglabs/neutrino"
 	"github.com/lightningnetwork/lnd/blockcache"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -38,6 +38,34 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/vulpemventures/go-bip39"
 )
+
+type WalletOption func(*service) error
+
+type WalletConfig struct {
+	Datadir string
+	Network common.Network
+}
+
+func (c WalletConfig) chainParams() *chaincfg.Params {
+	switch c.Network.Name {
+	case common.Bitcoin.Name:
+		return &chaincfg.MainNetParams
+	//case common.BitcoinTestNet4.Name: //TODO uncomment once supported
+	//	return &chaincfg.TestNet4Params
+	case common.BitcoinTestNet.Name:
+		return &chaincfg.TestNet3Params
+	case common.BitcoinSigNet.Name:
+		return &chaincfg.SigNetParams
+	case common.BitcoinMutinyNet.Name:
+		return &common.MutinyNetSigNetParams
+	case common.BitcoinRegTest.Name:
+		return &chaincfg.RegressionNetParams
+	default:
+		return &chaincfg.MainNetParams
+	}
+}
+
+type accountName string
 
 const (
 	// p2wkh scope
@@ -65,6 +93,35 @@ var (
 	p2trKeyScope          = waddrmgr.KeyScopeBIP0086
 	outputLockDuration    = time.Minute
 )
+
+// add additional chain API not supported by the chain.Interface type
+type extraChainAPI interface {
+	getTx(txid string) (*wire.MsgTx, error)
+	getTxStatus(txid string) (isConfirmed bool, blockHeight, blocktime int64, err error)
+	broadcast(txHex string) error
+}
+
+type service struct {
+	wallet *btcwallet.BtcWallet
+	cfg    WalletConfig
+
+	chainSource  chain.Interface
+	scanner      chain.Interface
+	extraAPI     extraChainAPI
+	feeEstimator chainfee.Estimator
+
+	watchedScriptsLock sync.RWMutex
+	watchedScripts     map[string]struct{}
+
+	// holds the data related to the server key used in Vtxo scripts
+	serverKeyAddr waddrmgr.ManagedPubKeyAddress
+
+	// cached forfeit addres
+	forfeitAddr string
+
+	isSynced bool
+	syncedCh chan struct{}
+}
 
 // NewService creates the wallet service, an option must be set to configure the chain source.
 func NewService(cfg WalletConfig, options ...WalletOption) (WalletService, error) {
@@ -300,63 +357,6 @@ func WithBitcoindZMQ(block, tx string, host, user, pass string) WalletOption {
 
 		return nil
 	}
-}
-
-type service struct {
-	wallet *btcwallet.BtcWallet
-	cfg    WalletConfig
-
-	chainSource  chain.Interface
-	scanner      chain.Interface
-	extraAPI     extraChainAPI
-	feeEstimator chainfee.Estimator
-
-	watchedScriptsLock sync.RWMutex
-	watchedScripts     map[string]struct{}
-
-	// holds the data related to the server key used in Vtxo scripts
-	serverKeyAddr waddrmgr.ManagedPubKeyAddress
-
-	// cached forfeit addres
-	forfeitAddr string
-
-	isSynced bool
-	syncedCh chan struct{}
-}
-
-type WalletOption func(*service) error
-
-type WalletConfig struct {
-	Datadir string
-	Network common.Network
-}
-
-func (c WalletConfig) chainParams() *chaincfg.Params {
-	switch c.Network.Name {
-	case common.Bitcoin.Name:
-		return &chaincfg.MainNetParams
-	//case common.BitcoinTestNet4.Name: //TODO uncomment once supported
-	//	return &chaincfg.TestNet4Params
-	case common.BitcoinTestNet.Name:
-		return &chaincfg.TestNet3Params
-	case common.BitcoinSigNet.Name:
-		return &chaincfg.SigNetParams
-	case common.BitcoinMutinyNet.Name:
-		return &common.MutinyNetSigNetParams
-	case common.BitcoinRegTest.Name:
-		return &chaincfg.RegressionNetParams
-	default:
-		return &chaincfg.MainNetParams
-	}
-}
-
-type accountName string
-
-// add additional chain API not supported by the chain.Interface type
-type extraChainAPI interface {
-	getTx(txid string) (*wire.MsgTx, error)
-	getTxStatus(txid string) (isConfirmed bool, blockHeight, blocktime int64, err error)
-	broadcast(txHex string) error
 }
 
 func (s *service) Close() {
