@@ -296,8 +296,6 @@ WHERE type_100_count >= 1 -- more than 1 submit event
     SELECT 1 FROM offchain_tx WHERE offchain_tx.txid = payload_id 
   );`
 
-const deleteTxs = `DELETE FROM offchain_tx WHERE txid = ANY($1)`
-
 func parseEvents(data []byte) ([]domain.Event, error) {
 	// First, unmarshal into a slice of raw JSON values.
 	var rawEvents []json.RawMessage

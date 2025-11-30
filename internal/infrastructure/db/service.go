@@ -493,6 +493,95 @@ func (s *service) updateProjectionsAfterOffchainTxEvents(events []domain.Event) 
 	}
 }
 
+func (s *service) updateProjectionsAfterReplayingOffchainTxEvents(events []domain.Event) {
+	ctx := context.Background()
+	offchainTx := domain.NewOffchainTxFromEvents(events)
+
+	if err := s.offchainTxStore.AddOrUpdateOffchainTx(ctx, offchainTx); err != nil {
+		log.WithError(err).Errorf("failed to add or update offchain tx %s", offchainTx.ArkTxid)
+		return
+	}
+	log.Debugf("added or updated offchain tx %s", offchainTx.ArkTxid)
+
+	switch {
+	case offchainTx.IsAccepted():
+		spentVtxos := make(map[domain.Outpoint]string)
+		for _, tx := range offchainTx.CheckpointTxs {
+			txid, ins, _, err := s.txDecoder.DecodeTx(tx)
+			if err != nil {
+				log.WithError(err).Warn("failed to decode checkpoint tx")
+				continue
+			}
+			for _, in := range ins {
+				spentVtxos[in] = txid
+			}
+		}
+
+		if err := s.vtxoStore.SpendVtxos(ctx, spentVtxos, offchainTx.ArkTxid); err != nil {
+			log.WithError(err).Warn("failed to spend vtxos")
+			return
+		}
+		log.Debugf("spent %d vtxos", len(spentVtxos))
+	case offchainTx.IsFinalized():
+		spentVtxos := make(map[domain.Outpoint]string)
+		for _, tx := range offchainTx.CheckpointTxs {
+			txid, ins, _, err := s.txDecoder.DecodeTx(tx)
+			if err != nil {
+				log.WithError(err).Warn("failed to decode checkpoint tx")
+				continue
+			}
+			for _, in := range ins {
+				spentVtxos[in] = txid
+			}
+		}
+
+		txid, _, outs, err := s.txDecoder.DecodeTx(offchainTx.ArkTx)
+		if err != nil {
+			log.WithError(err).Warn("failed to decode ark tx")
+			return
+		}
+
+		newVtxos := make([]domain.Vtxo, 0, len(outs))
+		for outIndex, out := range outs {
+			// ignore anchors
+			if bytes.Equal(out.PkScript, txutils.ANCHOR_PKSCRIPT) {
+				continue
+			}
+
+			isDust := script.IsSubDustScript(out.PkScript)
+
+			newVtxos = append(newVtxos, domain.Vtxo{
+				Outpoint: domain.Outpoint{
+					Txid: txid,
+					VOut: uint32(outIndex),
+				},
+				PubKey:             hex.EncodeToString(out.PkScript[2:]),
+				Amount:             uint64(out.Amount),
+				ExpiresAt:          offchainTx.ExpiryTimestamp,
+				CommitmentTxids:    offchainTx.CommitmentTxidsList(),
+				RootCommitmentTxid: offchainTx.RootCommitmentTxId,
+				Preconfirmed:       true,
+				CreatedAt:          offchainTx.StartingTimestamp,
+				// mark the vtxo as "swept" if it is below dust limit to prevent it from being spent again in a future offchain tx
+				// the only way to spend a swept vtxo is by collecting enough dust to cover the minSettlementVtxoAmount and then settle.
+				// because sub-dust vtxos are using OP_RETURN output script, they can't be unilaterally exited.
+				Swept: isDust,
+			})
+		}
+
+		if err := s.vtxoStore.SpendVtxos(ctx, spentVtxos, offchainTx.ArkTxid); err != nil {
+			log.WithError(err).Warn("failed to spend vtxos")
+			return
+		}
+		log.Debugf("spent %d vtxos", len(spentVtxos))
+		if err := s.vtxoStore.AddVtxos(ctx, newVtxos); err != nil {
+			log.WithError(err).Warn("failed to add vtxos")
+			return
+		}
+		log.Debugf("added %d vtxos", len(newVtxos))
+	}
+}
+
 func (s *service) fixOffchainTxsWithSpentInputsAndNoOuts(ctx context.Context) error {
 	ev, err := s.offchainTxStore.GetOffchainTxsWithSpentInputsAndNoOuts(ctx)
 	if err != nil {
@@ -549,7 +638,7 @@ func (s *service) fixOffchainTxsWithSpentInputsAndNoOuts(ctx context.Context) er
 				fmt.Printf("failed to sweep vtxos: %s\n", err)
 				return nil
 			}
-			fmt.Printf("SWEEPT %d/%d VTXOS\n", count, len(vtxos))
+			fmt.Printf("SWEPT %d/%d VTXOS\n", count, len(vtxos))
 		}
 		fmt.Println("DONE")
 	}
@@ -588,17 +677,17 @@ func (s *service) fixOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(ctx cont
 
 	unspentCount := 0
 	txids := make([]string, 0)
+	txidsOfUnspent := make([]string, 0)
 	for _, v := range vtxos {
-		if v.ArkTxid == "" {
+		if v.ArkTxid == "" && v.SpentBy == "" && v.SettledBy == "" {
 			unspentCount++
+			txidsOfUnspent = append(txidsOfUnspent, expectedArkTxid[v.Outpoint.String()])
 			continue
 		}
 		if v.ArkTxid != expectedArkTxid[v.Outpoint.String()] {
 			txids = append(txids, expectedArkTxid[v.Outpoint.String()])
 		}
 	}
-
-	fmt.Println("UNSPENT COUNT:", unspentCount)
 
 	if len(txids) == 0 {
 		fmt.Println("NO DOUBLE-SPEND TXS TO DELETE")
@@ -608,6 +697,58 @@ func (s *service) fixOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(ctx cont
 		}
 		fmt.Printf("DELETED %d DOUBLE-SPEND TXS\n", len(txids))
 	}
+
+	if len(txidsOfUnspent) == 0 {
+		fmt.Printf("NO TXS DETECTED THAT HAVE UNSPENT INPUTS AND NO OUTS IN VTXO TABLE\n")
+	} else {
+		outpoints := make([]domain.Outpoint, 0)
+		for _, txid := range txidsOfUnspent {
+			s.updateProjectionsAfterReplayingOffchainTxEvents(ev[txid])
+			outpoints = append(outpoints, []domain.Outpoint{
+				{Txid: txid, VOut: 0}, {Txid: txid, VOut: 1},
+			}...)
+			time.Sleep(50 * time.Millisecond)
+		}
+		fmt.Printf("UPDATED %d TXS THAT HAD UNSPENT INPUTS AND NO OUTS IN VTXO TABLE\n", len(txidsOfUnspent))
+
+		vtxos, err := s.vtxoStore.GetVtxos(ctx, outpoints)
+		if err != nil {
+			return nil
+		}
+		fmt.Printf("SPENT %d VTXOS\n", len(txidsOfUnspent))
+		fmt.Printf("ADDED %d VTXOS\n", len(vtxos))
+
+		indexedVtxos := map[string][]domain.Vtxo{}
+		for _, vtxo := range vtxos {
+			indexedVtxos[vtxo.RootCommitmentTxid] = append(indexedVtxos[vtxo.RootCommitmentTxid], vtxo)
+		}
+
+		vtxosToSweep := make([]domain.Outpoint, 0)
+		for commitmentTxid, targets := range indexedVtxos {
+			round, err := s.roundStore.GetRoundWithCommitmentTxid(ctx, commitmentTxid)
+			if err != nil {
+				fmt.Printf("failed to get round with commitment txid %s: %s\n", commitmentTxid, err)
+				return nil
+			}
+			if round.Swept {
+				for _, vtxo := range targets {
+					vtxosToSweep = append(vtxosToSweep, vtxo.Outpoint)
+				}
+			}
+		}
+
+		if len(vtxosToSweep) == 0 {
+			fmt.Printf("NO VTXOS TO SWEEP\n")
+		} else {
+			count, err := s.vtxoStore.SweepVtxos(ctx, vtxosToSweep)
+			if err != nil {
+				fmt.Printf("failed to sweep vtxos: %s\n", err)
+				return nil
+			}
+			fmt.Printf("SWEPT %d/%d VTXOS\n", count, len(vtxos))
+		}
+	}
+
 	fmt.Println("DONE")
 	return nil
 }
