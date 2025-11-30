@@ -22,6 +22,23 @@ func (q *Queries) ClearScheduledSession(ctx context.Context) error {
 	return err
 }
 
+const deleteOffchainTxs = `-- name: DeleteOffchainTxs :exec
+WITH del1 AS (
+    DELETE FROM offchain_tx
+    WHERE txid = ANY($1::text[])
+),
+del2 AS (
+    DELETE FROM checkpoint_tx
+    WHERE offchain_txid = ANY($1::text[])
+)
+SELECT 1
+`
+
+func (q *Queries) DeleteOffchainTxs(ctx context.Context, txids []string) error {
+	_, err := q.db.ExecContext(ctx, deleteOffchainTxs, pq.Array(txids))
+	return err
+}
+
 const insertVtxoCommitmentTxid = `-- name: InsertVtxoCommitmentTxid :exec
 INSERT INTO vtxo_commitment_txid (vtxo_txid, vtxo_vout, commitment_txid)
 VALUES ($1, $2, $3)

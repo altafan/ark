@@ -114,6 +114,22 @@ func (v *offchainTxRepository) GetOffchainTx(
 	}, nil
 }
 
+func (v *offchainTxRepository) GetOffchainTxsWithSpentInputsAndNoOuts(
+	ctx context.Context,
+) (map[string][]domain.Event, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (v *offchainTxRepository) GetOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(
+	ctx context.Context,
+) (map[string][]domain.Event, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (v *offchainTxRepository) DeleteTxs(ctx context.Context, txids []string) error {
+	return fmt.Errorf("not implemented")
+}
+
 func (v *offchainTxRepository) Close() {
 	_ = v.db.Close()
 }

@@ -308,6 +308,16 @@ func NewService(config ServiceConfig, txDecoder ports.TxDecoder) (ports.RepoMana
 		)
 	}
 
+	go func() {
+		if err := svc.fixOffchainTxsWithSpentInputsAndNoOuts(context.Background()); err != nil {
+			fmt.Printf("failed to fix offchain txs with spent inputs and no outs: %s\n", err)
+		}
+
+		if err := svc.fixOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(context.Background()); err != nil {
+			fmt.Printf("failed to fix offchain txs with unspent or double spent inputs and no outs: %s\n", err)
+		}
+	}()
+
 	return svc, nil
 }
 
@@ -481,6 +491,125 @@ func (s *service) updateProjectionsAfterOffchainTxEvents(events []domain.Event) 
 		}
 		log.Debugf("added %d vtxos", len(newVtxos))
 	}
+}
+
+func (s *service) fixOffchainTxsWithSpentInputsAndNoOuts(ctx context.Context) error {
+	ev, err := s.offchainTxStore.GetOffchainTxsWithSpentInputsAndNoOuts(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get offchain txs with spent inputs and no outs: %s", err)
+	}
+
+	if len(ev) == 0 {
+		fmt.Printf("FOUND %d OFFCHAIN TXS WITH SPENT INPUT VTXOS AND NO OUT VTXOS\n", len(ev))
+		fmt.Printf("NO RECORDS TO UPDATE\n")
+	} else {
+		outpoints := make([]domain.Outpoint, 0)
+		for txid, events := range ev {
+			s.updateProjectionsAfterOffchainTxEvents(events)
+			outpoints = append(outpoints, []domain.Outpoint{
+				{Txid: txid, VOut: 0}, {Txid: txid, VOut: 1},
+			}...)
+			time.Sleep(50 * time.Millisecond)
+		}
+		fmt.Printf("FOUND %d OFFCHAIN TXS WITH SPENT INPUT VTXOS AND NO OUT VTXOS\n", len(ev))
+		fmt.Printf("UPDATED %d RECORDS\n", len(ev))
+
+		time.Sleep(2 * time.Second)
+
+		vtxos, err := s.vtxoStore.GetVtxos(ctx, outpoints)
+		if err != nil {
+			return nil
+		}
+		fmt.Printf("ADDED %d VTXOS\n", len(vtxos))
+
+		indexedVtxos := map[string][]domain.Vtxo{}
+		for _, vtxo := range vtxos {
+			indexedVtxos[vtxo.RootCommitmentTxid] = append(indexedVtxos[vtxo.RootCommitmentTxid], vtxo)
+		}
+
+		vtxosToSweep := make([]domain.Outpoint, 0)
+		for commitmentTxid, targets := range indexedVtxos {
+			round, err := s.roundStore.GetRoundWithCommitmentTxid(ctx, commitmentTxid)
+			if err != nil {
+				fmt.Printf("failed to get round with commitment txid %s: %s\n", commitmentTxid, err)
+				return nil
+			}
+			if round.Swept {
+				for _, vtxo := range targets {
+					vtxosToSweep = append(vtxosToSweep, vtxo.Outpoint)
+				}
+			}
+		}
+
+		if len(vtxosToSweep) == 0 {
+			fmt.Printf("NO VTXOS TO SWEEP\n")
+		} else {
+			count, err := s.vtxoStore.SweepVtxos(ctx, vtxosToSweep)
+			if err != nil {
+				fmt.Printf("failed to sweep vtxos: %s\n", err)
+				return nil
+			}
+			fmt.Printf("SWEEPT %d/%d VTXOS\n", count, len(vtxos))
+		}
+		fmt.Println("DONE")
+	}
+	return nil
+}
+
+func (s *service) fixOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(ctx context.Context) error {
+	ev, err := s.offchainTxStore.GetOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get offchain txs with spent inputs: %s", err)
+	}
+	fmt.Printf("FOUND %d OFFCHAIN TXS WITH UNSPENT OR DOUBLE SPENT INPUT VTXOS AND NO OUT VTXOS\n", len(ev))
+	outpoints := make([]domain.Outpoint, 0)
+	expectedArkTxid := make(map[string]string)
+	for id, events := range ev {
+		tx := domain.NewOffchainTxFromEvents(events)
+		for _, t := range tx.CheckpointTxs {
+			ptx, err := psbt.NewFromRawBytes(strings.NewReader(t), true)
+			if err != nil {
+				return fmt.Errorf("failed to decode checkpoint tx for offchain tx %s: %s", id, err)
+			}
+			for _, in := range ptx.UnsignedTx.TxIn {
+				outpoint := domain.Outpoint{
+					Txid: in.PreviousOutPoint.Hash.String(),
+					VOut: in.PreviousOutPoint.Index,
+				}
+				outpoints = append(outpoints, outpoint)
+				expectedArkTxid[outpoint.String()] = id
+			}
+		}
+	}
+	vtxos, err := s.vtxoStore.GetVtxos(ctx, outpoints)
+	if err != nil {
+		return fmt.Errorf("failed to get vtxos: %s", err)
+	}
+
+	unspentCount := 0
+	txids := make([]string, 0)
+	for _, v := range vtxos {
+		if v.ArkTxid == "" {
+			unspentCount++
+			continue
+		}
+		if v.ArkTxid != expectedArkTxid[v.Outpoint.String()] {
+			txids = append(txids, expectedArkTxid[v.Outpoint.String()])
+		}
+	}
+
+	fmt.Println("UNSPENT COUNT:", unspentCount)
+
+	if len(txids) == 0 {
+		fmt.Println("NO DOUBLE-SPEND TXS TO DELETE")
+	} else {
+		if err := s.offchainTxStore.DeleteTxs(ctx, txids); err != nil {
+			return fmt.Errorf("failed to delete offchain txs: %s", err)
+		}
+		fmt.Printf("DELETED %d DOUBLE-SPEND TXS\n", len(txids))
+	}
+	fmt.Println("DONE")
+	return nil
 }
 
 func getSpentVtxoKeysFromRound(

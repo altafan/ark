@@ -236,7 +236,11 @@ func (s *OffchainTx) on(event Event, replayed bool) {
 		s.CheckpointTxs = e.UnsignedCheckpointTxs
 		s.StartingTimestamp = e.StartingTimestamp
 	case OffchainTxAccepted:
-		if s.Stage.Code != int(OffchainTxRequestedStage) || s.Stage.Failed {
+		// some of the events we store start with reuest, fail, accept, finalize.
+		// We need this change to be able to replay accept after fail.
+		// This change must not reach master as there we're sure there are no race conditions in redis cache
+		// and also that we don't retry requet/accept if the same offchain tx is already in db.
+		if s.Stage.Code != int(OffchainTxRequestedStage) {
 			return
 		}
 		s.Stage.Code = int(OffchainTxAcceptedStage)

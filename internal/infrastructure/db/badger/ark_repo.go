@@ -228,6 +228,22 @@ func (r *arkRepository) GetOffchainTx(
 	return r.getOffchainTx(ctx, txid)
 }
 
+func (r *arkRepository) GetOffchainTxsWithSpentInputsAndNoOuts(
+	ctx context.Context,
+) (map[string][]domain.Event, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *arkRepository) GetOffchainTxsWithUnspentOrDoubleSpentInputsAndNoOuts(
+	ctx context.Context,
+) (map[string][]domain.Event, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (r *arkRepository) DeleteTxs(ctx context.Context, txids []string) error {
+	return fmt.Errorf("not implemented")
+}
+
 func (r *arkRepository) Close() {
 	// nolint
 	r.store.Close()

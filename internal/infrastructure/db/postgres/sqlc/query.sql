@@ -354,3 +354,14 @@ ORDER BY created_at ASC;
 SELECT * FROM conviction 
 WHERE crime_round_id = @round_id
 ORDER BY created_at ASC;
+
+-- name: DeleteOffchainTxs :exec
+WITH del1 AS (
+    DELETE FROM offchain_tx
+    WHERE txid = ANY(@txids::text[])
+),
+del2 AS (
+    DELETE FROM checkpoint_tx
+    WHERE offchain_txid = ANY(@txids::text[])
+)
+SELECT 1;

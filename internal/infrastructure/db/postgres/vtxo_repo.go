@@ -155,7 +155,7 @@ func (v *vtxoRepository) GetVtxos(
 		)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return nil, nil
+				continue
 			}
 			return nil, err
 		}
